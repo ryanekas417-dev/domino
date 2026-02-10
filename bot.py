@@ -11,26 +11,44 @@ from telegram.ext import (
     InlineQueryHandler, ContextTypes
 )
 
-# --- KONFIGURASI ---
-TOKEN = "TOKEN_BOT_ANDA"
-ADMIN_ID = 12345678 
-with open('kartu.json', 'r') as f:
-    ALL_CARDS = json.load(f)
+# --- KONFIGURASI (AMBIL DARI OS ENV) ---
+TOKEN = os.getenv("TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-games = {} # {chat_id: {data}}
+# Load 28 kartu dari kartu.json
+try:
+    with open('kartu.json', 'r') as f:
+        ALL_CARDS = json.load(f)
+except FileNotFoundError:
+    ALL_CARDS = []
+
+# Penampung Game Aktif
+games = {} 
+
+# --- DATABASE INIT ---
+def init_db():
+    if not DATABASE_URL: return
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS users 
+                   (id BIGINT PRIMARY KEY, name TEXT, koin INT DEFAULT 1000)''')
+    conn.commit()
+    cur.close()
+    conn.close()
 
 # --- LOGIKA GAME ---
 async def new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
-    # Inisialisasi Lobby
+    # Inisialisasi Data Game
     games[chat_id] = {
         "creator": user_id,
-        "players": [], # [{"id": 123, "name": "Budi", "hand": []}]
+        "players": [], 
         "status": "LOBBY",
         "table": [],
-        "ends": [None, None], # [ujung_kiri, ujung_kanan]
+        "ends": [None, None], # [Ujung Kiri, Ujung Kanan]
         "turn_index": 0
     }
     
@@ -55,16 +73,18 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("Lobby penuh (Max 4)!")
 
     game["players"].append({"id": user.id, "name": user.first_name, "hand": []})
-    await query.answer("Berhasil Join!")
+    await query.answer(f"Halo {user.first_name}, kamu masuk lobby!")
     
-    # Hanya creator yang bisa lihat tombol START
+    # Update tampilan lobby
     kb = [[InlineKeyboardButton("Join Game 🤝", callback_data="join")]]
     if len(game["players"]) >= 2:
         kb.append([InlineKeyboardButton("Mulai Game 🚀", callback_data="start_now")])
         
     await query.message.edit_text(
-        f"🀄 **LOBBY GAPLE**\nTotal: {len(game['players'])} Pemain\nHost: <a href='tg://user?id={game['creator']}'>Klik Mulai</a>",
-        reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+        f"🀄 **LOBBY GAPLE**\nTotal: {len(game['players'])} Pemain\n\n"
+        f"Host: {game['players'][0]['name']}\n"
+        f"Status: Menunggu Host memulai...",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def start_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -72,30 +92,34 @@ async def start_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     game = games[chat_id]
 
-    # VALIDASI: Hanya pembuat lobby yang bisa klik mulai
+    # Hanya creator yang boleh mulai
     if query.from_user.id != game["creator"]:
         return await query.answer("Hanya pembuat lobby yang bisa memulai!", show_alert=True)
+
+    if len(game["players"]) < 2:
+        return await query.answer("Minimal butuh 2 pemain!")
 
     game["status"] = "PLAYING"
     deck = ALL_CARDS.copy()
     random.shuffle(deck)
     
-    # Bagi kartu (7 per orang)
+    # Bagi kartu 7 per orang
     for p in game["players"]:
         p["hand"] = [deck.pop() for _ in range(7)]
     
-    player_skrg = game["players"][game["turn_index"]]["name"]
+    nama_giliran = game["players"][game["turn_index"]]["name"]
     await query.message.edit_text(
-        f"🏁 **GAME DIMULAI!**\n\nGiliran Pertama: **{player_skrg}**\n\nKetik `@nama_bot` untuk pilih kartu!",
+        f"🏁 **GAME DIMULAI!**\n\nGiliran: **{nama_giliran}**\n\n"
+        f"Ketik `@{(await context.bot.get_me()).username}` untuk pilih kartu!",
         parse_mode="Markdown"
     )
 
-# --- INLINE QUERY: FILTER KARTU ---
+# --- INLINE QUERY: LOGIKA FILTER KARTU ---
 async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query
     user_id = query.from_user.id
     
-    # Cari game aktif user ini
+    # Cari game aktif di mana user ini bergabung
     current_game = None
     my_data = None
     for gid, gdata in games.items():
@@ -110,37 +134,54 @@ async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = []
     ends = current_game["ends"]
     
-    # CEK APAKAH GILIRAN DIA?
+    # Cek apakah ini giliran si user?
     is_my_turn = current_game["players"][current_game["turn_index"]]["id"] == user_id
 
     for card in my_data["hand"]:
-        # LOGIKA VALIDASI:
-        # 1. Harus giliran dia
-        # 2. Jika meja kosong, semua kartu boleh (True)
-        # 3. Jika meja isi, salah satu sisi kartu harus sama dengan salah satu ujung meja
         can_play = False
+        # Logika: Jika giliran saya...
         if is_my_turn:
+            # Jika meja kosong (awal game), semua kartu boleh
             if ends[0] is None: 
                 can_play = True
+            # Jika meja ada isinya, salah satu sisi kartu harus match ujung meja
             elif card["sisi_a"] in ends or card["sisi_b"] in ends:
                 can_play = True
 
+        # Hanya kartu yang bisa dimainkan yang muncul di menu inline
         if can_play:
             results.append(
                 InlineQueryResultCachedSticker(
-                    id=f"{card['nama']}_{current_game['creator']}", # ID unik
+                    id=f"{card['nama']}_{user_id}", 
                     sticker_file_id=card["sticker_id"]
                 )
             )
-        # Kartu yang TIDAK cocok tidak dimasukkan ke results 
-        # (Otomatis tidak muncul/greyed out di mata user)
 
     await query.answer(results, cache_time=0, is_personal=True)
 
+# --- ADMIN: BACKUP DATABASE ---
+async def send_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    
+    # Kirim file kartu.json sebagai backup
+    if os.path.exists("kartu.json"):
+        await update.message.reply_document(
+            open("kartu.json", "rb"), 
+            caption="Ini backup kartu.json terbaru kamu."
+        )
+    else:
+        await update.message.reply_text("File kartu.json tidak ditemukan.")
+
 if __name__ == '__main__':
+    # init_db() # Jalankan jika sudah setup PostgreSQL di Railway
+    
     app = ApplicationBuilder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("new", new_game))
+    app.add_handler(CommandHandler("senddb", send_db))
     app.add_handler(CallbackQueryHandler(join_game, pattern="join"))
     app.add_handler(CallbackQueryHandler(start_now, pattern="start_now"))
     app.add_handler(InlineQueryHandler(handle_inline))
+    
+    print("Bot Gaple Online Siap!")
     app.run_polling()
