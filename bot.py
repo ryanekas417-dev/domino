@@ -2,16 +2,19 @@ import os
 import json
 import random
 import psycopg2
-from telegram import (import os
-import json
-import random
 from telegram import (
-    InlineQueryResultCachedSticker, InlineKeyboardButton, 
-    InlineKeyboardMarkup, Update
+    InlineQueryResultCachedSticker, 
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup, 
+    Update
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
-    InlineQueryHandler, ChosenInlineResultHandler, ContextTypes
+    ApplicationBuilder, 
+    CommandHandler, 
+    CallbackQueryHandler, 
+    InlineQueryHandler, 
+    ChosenInlineResultHandler, 
+    ContextTypes
 )
 
 # --- CONFIG ---
