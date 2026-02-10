@@ -1,4 +1,4 @@
-aimport os
+import os
 import json
 import random
 import psycopg2
